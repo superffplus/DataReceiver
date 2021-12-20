@@ -14,8 +14,15 @@
 #include <array>
 #include <sstream>
 #include <thread>
+#include <signal.h>
 
 #pragma comment(lib,"CYTDATAPARSER.lib")
+
+sig_atomic_t volatile run = 1;
+extern "C" void signal_handler(int) {
+	std::cout << "Got interrupt signal.\n";
+	run = 0;
+}
 
 struct InitParameter{
 	int source_port;
@@ -66,8 +73,8 @@ DataStructure RetriveData(CParserResult cr) {
 	return ds;
 }
 
-void receive_data_task(UDPserver userver){
-	while (true) {
+void receive_data_task(UDP userver){
+	while (run) {
 		userver.receive_udp();
 		Sleep(10);
 	}
@@ -75,7 +82,7 @@ void receive_data_task(UDPserver userver){
 }
 
 void parser_data_task(parser_data_struct pds){
-	while (true) {
+	while (run) {
 		ReceiveData rd = pds.rq->wait_pop();
 		int lib_init_state = cyt_OnInit(NULL);
 		int parser_state = cyt_OnParser(rd.transdata, UDP_DATA_LENGTH, &pds.cr);
@@ -84,8 +91,8 @@ void parser_data_task(parser_data_struct pds){
 	}
 }
 
-void send_data_task(UDPclient* uclient){
-	while (true)
+void send_data_task(UDP* uclient){
+	while (run)
 	{
 		uclient->send_udp();
 	}
@@ -105,8 +112,7 @@ int main()
 	// UDP server初始化相关参数，用于接收simulation的数据
 	ReceivedQueue rq;   //接收数据源数据的队列
 	LockedQueue lq;   //存放准备发送的数据
-	UDPserver userver = UDPserver(initparam.source_port, UDP_DATA_LENGTH, &rq);
-	UDPclient uclient = UDPclient(initparam.server_address.c_str(), initparam.server_port, &lq);
+	UDP userver = UDP(initparam.source_port, UDP_DATA_LENGTH, &rq, initparam.server_address.c_str(), initparam.server_port, &lq);
 
 	// 解析数据用
 	CParserResult myParserResultForBig;
@@ -115,13 +121,29 @@ int main()
 	pds.lq = &lq;
 	pds.cr = myParserResultForBig;
 
+	void(*error)(int) = 0;
+	error = signal(SIGTERM, &signal_handler);
+	if (error) {
+		std::cerr << "Coundn't set SIGTERM handler.\n";
+		return 1;
+	}
+	error = signal(SIGINT, &signal_handler);
+	if (error) {
+		std::cerr << "Coundn't set SIGINT handler.\n";
+		return 1;
+	}
+
 	std::thread t_receive(receive_data_task, userver);
 	std::thread t_retrive(parser_data_task, pds);
-	std::thread t_send(send_data_task, &uclient);
+	std::thread t_send(send_data_task, &userver);
 
 	t_receive.join();
 	t_retrive.join();
 	t_send.join();
+
+	cyt_OnClose();
+	userver.CloseUDP();
+	printf("Program exits!");
 	
 	return 0;
 }
